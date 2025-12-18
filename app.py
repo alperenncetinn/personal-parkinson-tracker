@@ -81,7 +81,7 @@ def train_model():
     else:
         full_data = df_orig
 
-    # ✅ Feature Hazırlığı: subject# ÇIKARILACAK (feature leakage engellenir)
+    #  Feature Hazırlığı: subject# ÇIKARILACAK (feature leakage engellenir)
     X = full_data.drop(['subject#', 'total_UPDRS', 'motor_UPDRS'], axis=1)
     
     # Baseline/delta sütunları varsa çıkar (bunlar feature olmayacak)
@@ -89,19 +89,19 @@ def train_model():
     if cols_to_drop:
         X = X.drop(cols_to_drop, axis=1)
     
-    # ✅ Hedef: MUTLAK total_UPDRS (delta değil)
+    #  Hedef: MUTLAK total_UPDRS (delta değil)
     y = full_data['total_UPDRS']
     
-    # ✅ Patient-wise split için group bilgisi
+    #  Patient-wise split için group bilgisi
     groups = full_data['subject#']
 
-    # ✅ NaN içeren satırları düş (özellik/etiket eksikleri modeli bozmasın)
+    #  NaN içeren satırları düş (özellik/etiket eksikleri modeli bozmasın)
     non_na_mask = X.notna().all(axis=1) & y.notna()
     X = X.loc[non_na_mask]
     y = y.loc[non_na_mask]
     groups = groups.loc[non_na_mask]
 
-    # ✅ Sayısal tiplere dönüştür (CSV okuma kaynaklı string tipler varsa)
+    #  Sayısal tiplere dönüştür (CSV okuma kaynaklı string tipler varsa)
     X = X.apply(pd.to_numeric, errors='coerce')
     y = pd.to_numeric(y, errors='coerce')
     
@@ -122,7 +122,7 @@ def train_model():
     model = xgb.XGBRegressor(n_estimators=500, learning_rate=0.05, max_depth=7, n_jobs=-1)
     model.fit(X_train_scaled, y_train)
     
-    # ✅ Model, Scaler ve Feature Columns'u Kaydet
+    # Model, Scaler ve Feature Columns'u Kaydet
     model.save_model(MODEL_FILE)
     
     import pickle
@@ -137,13 +137,13 @@ def train_model():
     score = model.score(X_test_scaled, y_test)
     
     # Bilgi Mesajları
-    status.success(f"✅ Eğitim Tamamlandı! Test R² skoru: {score:.3f}")
+    status.success(f"Eğitim Tamamlandı! Test R² skoru: {score:.3f}")
     st.info(f"ℹ️ Feature sayısı: {len(X.columns)} (subject# hariç)")
     st.info(f"ℹ️ Train: {len(train_idx)} kayıt, Test: {len(test_idx)} kayıt")
     
     unique_train_patients = groups.iloc[train_idx].nunique()
     unique_test_patients = groups.iloc[test_idx].nunique()
-    st.success(f"✅ Patient-wise split: Train {unique_train_patients} hasta, Test {unique_test_patients} hasta")
+    st.success(f"Patient-wise split: Train {unique_train_patients} hasta, Test {unique_test_patients} hasta")
     
     return scaler, list(X.columns)
 
@@ -161,7 +161,7 @@ def get_active_model():
     model = xgb.XGBRegressor()
     model.load_model(MODEL_FILE)
     
-    # ✅ Scaler'ı pickle'dan yükle
+    # Scaler'ı pickle'dan yükle
     import pickle
     if os.path.exists('scaler.pkl'):
         with open('scaler.pkl', 'rb') as f:
@@ -170,7 +170,7 @@ def get_active_model():
         st.error("⚠️ Scaler dosyası bulunamadı! Lütfen modeli yeniden eğitin.")
         return None, None, None, None, None
     
-    # ✅ Feature columns'u JSON'dan yükle (sıralama tutarlılığı için)
+    # Feature columns'u JSON'dan yükle (sıralama tutarlılığı için)
     import json
     if os.path.exists('feature_cols.json'):
         with open('feature_cols.json', 'r') as f:
@@ -179,7 +179,7 @@ def get_active_model():
         st.error("⚠️ Feature columns dosyası bulunamadı! Lütfen modeli yeniden eğitin.")
         return None, None, None, None, None
     
-    # ✅ Dict'leri başlat
+    #  Dict'leri başlat
     baselines = {}
     calib_biases = {}
     
@@ -195,7 +195,7 @@ def get_active_model():
             true_updrs = float(row.get('UPDRS_baseline', row['total_UPDRS']))
             baselines[pid] = true_updrs
             
-            # ✅ Kişisel bias hesapla: bias = clinical_UPDRS - pred_global
+            # Kişisel bias hesapla: bias = clinical_UPDRS - pred_global
             try:
                 # Feature'ları row'dan direkt al (sıralama garantili)
                 feats = row[feature_columns]
@@ -319,7 +319,7 @@ def doctor_panel():
                         
                         # Create chart data
                         # Create chart data
-                        # ✅ Prediction -> Prediction_Personal
+                        # Prediction -> Prediction_Personal
                         chart_data = pat_data[['Date', 'Prediction_Personal']].copy()
                         chart_data['Date'] = pd.to_datetime(chart_data['Date'])
                         chart_data = chart_data.sort_values('Date')
