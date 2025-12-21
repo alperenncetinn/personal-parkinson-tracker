@@ -136,7 +136,8 @@ def train_model():
     model.fit(X_train_scaled, y_train)
     
     # Model, Scaler ve Feature Columns'u Kaydet
-    model.save_model(MODEL_FILE)
+    # XGBoost 3.x fix: Sklearn wrapper hatasını önlemek için booster'ı kaydet
+    model.get_booster().save_model(MODEL_FILE)
     
     import pickle
     with open('scaler.pkl', 'wb') as f:
