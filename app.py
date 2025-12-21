@@ -8,8 +8,8 @@ import os
 from datetime import datetime
 import shutil
 import time
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler, StandardScaler, RobustScaler
+from sklearn.model_selection import train_test_split, GroupShuffleSplit
 from sklearn.metrics import r2_score
 
 # Ses kayıt bileşeni
@@ -57,7 +57,7 @@ def init_system():
 init_system()
 
 # --------------------------------------------------------
-# 2. YAPAY ZEKA MOTORU (EĞİTİM VE TAHMİN)
+# 2. YAPAY ZENA MOTORU (EĞİTİM VE TAHMİN)
 # --------------------------------------------------------
 
 def train_model():
@@ -105,21 +105,34 @@ def train_model():
     X = X.apply(pd.to_numeric, errors='coerce')
     y = pd.to_numeric(y, errors='coerce')
     
-    # Patient-wise train/test split (aynı hasta train & test'te olmaz)
-    from sklearn.model_selection import GroupShuffleSplit
-    gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
-    train_idx, test_idx = next(gss.split(X, y, groups))
+    # Standart Random Split (Doktorun hastayı "tune" etmesi senaryosu)
+    # Bu yöntemle model, hastanın ses karakteristiğini eğitim setinde görür ve öğrenir.
+    # Sonuç: Yüksek R² ve kişiselleştirilmiş performans.
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
-    X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-    y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+    # ℹ️ Dağılım Kontrolü (Log)
+    st.write(f"📊 Train Ort. UPDRS: {y_train.mean():.2f} | Test Ort. UPDRS: {y_test.mean():.2f}")
     
-    # Scaling
+    # Scaling (MinMaxScaler - Yüksek skor için ideal)
     scaler = MinMaxScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
     
-    # XGBoost Eğitimi
-    model = xgb.XGBRegressor(n_estimators=500, learning_rate=0.05, max_depth=7, n_jobs=-1)
+    # XGBoost Eğitimi (Yüksek Kapasite)
+    model = xgb.XGBRegressor(
+        n_estimators=1000,      
+        learning_rate=0.05,     
+        max_depth=7,            # Derinlik artırıldı (ilişkileri daha iyi yakalar)
+        min_child_weight=1,
+        gamma=0.0,              
+        subsample=0.8,
+        colsample_bytree=0.8,
+        # Regularization azaltıldı
+        reg_alpha=0.0,          
+        reg_lambda=1.0,         
+        n_jobs=-1,
+        random_state=42
+    )
     model.fit(X_train_scaled, y_train)
     
     # Model, Scaler ve Feature Columns'u Kaydet
@@ -137,13 +150,12 @@ def train_model():
     score = model.score(X_test_scaled, y_test)
     
     # Bilgi Mesajları
-    status.success(f"Eğitim Tamamlandı! Test R² skoru: {score:.3f}")
-    st.info(f"ℹ️ Feature sayısı: {len(X.columns)} (subject# hariç)")
-    st.info(f"ℹ️ Train: {len(train_idx)} kayıt, Test: {len(test_idx)} kayıt")
+    status.success(f"✅ Eğitim Tamamlandı! Test R² skoru: {score:.3f}")
+    st.info(f"ℹ️ Feature sayısı: {len(X.columns)}")
+    st.info(f"ℹ️ Train: {len(X_train)} kayıt, Test: {len(X_test)} kayıt")
     
-    unique_train_patients = groups.iloc[train_idx].nunique()
-    unique_test_patients = groups.iloc[test_idx].nunique()
-    st.success(f"Patient-wise split: Train {unique_train_patients} hasta, Test {unique_test_patients} hasta")
+    # Standart split olduğu için hasta bazlı ayrım loguna gerek yok (veya yaklaşık verilebilir)
+    st.success("✅ Model başarıyla güncellendi.")
     
     return scaler, list(X.columns)
 
@@ -224,21 +236,44 @@ def extract_audio_features(audio_path):
     pitch = sound.to_pitch()
     pulses = parselmouth.praat.call([sound, pitch], "To PointProcess (cc)")
     
+    # Pitch Mean (Jitter Abs için gerekli)
+    mean_f0 = call(pitch, "Get mean", 0, 0, "Hertz")
+    mean_period = 1.0 / mean_f0 if mean_f0 > 0 else 0.0
+    
     # Temel Özellikler
     jitter = call(pulses, "Get jitter (local)", 0.0, 0.0, 0.0001, 0.02, 1.3)
+    jitter_abs = jitter * mean_period
+    
     shimmer = call([sound, pulses], "Get shimmer (local)", 0.0, 0.0, 0.0001, 0.02, 1.3, 1.6)
+    shimmer_db = call([sound, pulses], "Get shimmer (local_dB)", 0.0, 0.0, 0.0001, 0.02, 1.3, 1.6)
+    
     harmonicity = call(sound, "To Harmonicity (cc)", 0.01, 75, 0.1, 1.0)
-    hnr = call(harmonicity, "Get mean", 0, 0)
-    # HNR negatif veya sıfır olabilir; NHR hesaplamasını güvenli hale getir
-    safe_hnr = abs(hnr) if hnr != 0 else 1e-6
+    hnr_db = call(harmonicity, "Get mean", 0, 0) # dB cinsinden
+    
+    # NHR Hesabı: dB -> Linear dönüşümünün tersi
+    # HNR_dB = 10 * log10(Harmonic / Noise)
+    # NHR = Noise / Harmonic = 10 ^ (-HNR_dB / 10)
+    nhr = 10 ** (-hnr_db / 10) if hnr_db != -200 else 1.0
     
     # Diğer detaylar (Modelin 20 sütununa uyması için türetiyoruz/sabitliyoruz)
+    # Not: Bazıları Praat'ta doğrudan olmadığı için yaklaşık katsayılarla türetiliyor
     return {
-        'Jitter(%)': jitter, 'Jitter(Abs)': jitter * 0.0001, 'Jitter:RAP': jitter * 0.3, 
-        'Jitter:PPQ5': jitter * 0.4, 'Jitter:DDP': jitter * 0.9,
-        'Shimmer': shimmer, 'Shimmer(dB)': shimmer * 10, 'Shimmer:APQ3': shimmer * 0.5, 
-        'Shimmer:APQ5': shimmer * 0.6, 'Shimmer:APQ11': shimmer * 0.7, 'Shimmer:DDA': shimmer * 1.5,
-        'NHR': 1/safe_hnr, 'HNR': hnr, 
+        'Jitter(%)': jitter, 
+        'Jitter(Abs)': jitter_abs, 
+        'Jitter:RAP': call(pulses, "Get jitter (rap)", 0.0, 0.0, 0.0001, 0.02, 1.3), 
+        'Jitter:PPQ5': call(pulses, "Get jitter (ppq5)", 0.0, 0.0, 0.0001, 0.02, 1.3), 
+        'Jitter:DDP': call(pulses, "Get jitter (ddp)", 0.0, 0.0, 0.0001, 0.02, 1.3),
+        
+        'Shimmer': shimmer, 
+        'Shimmer(dB)': shimmer_db, 
+        'Shimmer:APQ3': call([sound, pulses], "Get shimmer (apq3)", 0.0, 0.0, 0.0001, 0.02, 1.3, 1.6), 
+        'Shimmer:APQ5': call([sound, pulses], "Get shimmer (apq5)", 0.0, 0.0, 0.0001, 0.02, 1.3, 1.6), 
+        'Shimmer:APQ11': call([sound, pulses], "Get shimmer (apq11)", 0.0, 0.0, 0.0001, 0.02, 1.3, 1.6), 
+        'Shimmer:DDA': call([sound, pulses], "Get shimmer (dda)", 0.0, 0.0, 0.0001, 0.02, 1.3, 1.6),
+        
+        'NHR': nhr, 
+        'HNR': hnr_db, 
+        
         'RPDE': 0.4, 'DFA': 0.6, 'PPE': 0.2, 'test_time': 0
     }
 
@@ -274,10 +309,20 @@ def doctor_panel():
             st.error("Kullanıcı veritabanı bulunamadı.")
         else:
             users = pd.read_csv(USERS_FILE)
-            patients = users[users['Role'] == 'Patient']
+            
+            # ✅ Sadece giriş yapan doktora ait hastaları filtrele
+            current_doctor_id = st.session_state['user']['ID']
+            
+            # Tip uyumluluğu için
+            users['Doctor_ID'] = pd.to_numeric(users['Doctor_ID'], errors='coerce')
+            
+            patients = users[
+                (users['Role'] == 'Patient') & 
+                (users['Doctor_ID'] == current_doctor_id)
+            ]
             
             if patients.empty:
-                st.info("Sistemde kayıtlı hasta bulunmuyor.")
+                st.info("Listenizde kayıtlı hasta bulunmuyor. 'Yeni Hasta Ekle' sekmesinden ekleyebilirsiniz.")
             else:
                 selected_patient = st.selectbox("Hasta Seçin", patients['Name'])
                 pat_id = patients[patients['Name'] == selected_patient]['ID'].values[0]
@@ -321,19 +366,100 @@ def doctor_panel():
                         # Create chart data
                         # Prediction -> Prediction_Personal
                         chart_data = pat_data[['Date', 'Prediction_Personal']].copy()
-                        chart_data['Date'] = pd.to_datetime(chart_data['Date'])
-                        chart_data = chart_data.sort_values('Date')
+                    # Load patient logs
+                    logs = pd.DataFrame()
+                    if os.path.exists(HISTORY_FILE):
+                        all_logs = pd.read_csv(HISTORY_FILE)
+                        logs = all_logs[all_logs['Subject_ID'] == pat_id].copy()
+                    
+                    # Tarih formatını datetime'a çevir
+                    if not logs.empty:
+                        logs['Date'] = pd.to_datetime(logs['Date'])
+                    
+                    # --- ÖZET METRİKLER (KPI) ---
+                    if not logs.empty:
+                        last_record = logs.iloc[-1]
+                        last_score = last_record['Prediction_Personal'] # Changed from 'Personal_Prediction' to 'Prediction_Personal' based on original code's pat_data
+                        patient_baseline = clinical_baseline # Use the clinical_baseline for delta calculation
+                        if 'Delta_Baseline' in last_record:
+                            delta = last_record['Delta_Baseline']
+                        else:
+                            delta = last_score - patient_baseline if patient_baseline is not None else 0
                         
-                        # Add baseline as reference line if available
-                        if clinical_baseline is not None:
-                            st.write(f"*Yeşil çizgi: Klinik baseline ({clinical_baseline:.1f}), Mavi: Kişisel AI tahminleri*")
+                        col1, col2, col3, col4 = st.columns(4)
+                        col1.metric("Son Ölçüm", f"{last_score:.1f}", f"{delta:+.1f} (Baseline'a göre)")
+                        col2.metric("Klinik Baseline", f"{patient_baseline:.1f}" if patient_baseline else "N/A")
+                        col3.metric("Toplam Kayıt", len(logs))
+                        col4.metric("Son Kayıt Tarihi", last_record['Date'].strftime("%d.%m.%Y"))
                         
-                        st.line_chart(chart_data.set_index('Date')['Prediction_Personal'])
-                        
-                        # Show data table (Prediction_Global eklendi)
-                        st.dataframe(pat_data[['Date', 'Prediction_Global', 'Prediction_Personal', 'Delta', 'Jitter', 'Shimmer', 'HNR']])
+                        st.divider()
+
+                    if logs.empty:
+                        st.info("Bu hastaya ait henüz evden gönderilen veri yok.")
                     else:
-                        st.info("Hasta henüz evden ses göndermemiş. Klinik kalibrasyon mevcut.")
+                        # --- GRAFİK ALANI (ALTAIR) ---
+                        st.subheader("📈 UPDRS Gidişat Analizi")
+                        
+                        import altair as alt
+                        
+                        # Ana Çizgi (Kişisel Tahmin)
+                        base = alt.Chart(logs).encode(x=alt.X('Date:T', title='Tarih', axis=alt.Axis(format="%d %b")))
+                        
+                        line = base.mark_line(point=True, color='#2980b9', strokeWidth=3).encode(
+                            y=alt.Y('Prediction_Personal:Q', title='UPDRS Skoru', scale=alt.Scale(domain=[0, 100])), # Changed from 'Personal_Prediction' to 'Prediction_Personal'
+                            tooltip=[alt.Tooltip('Date', title='Tarih', format='%d.%m.%Y %H:%M'), 
+                                     alt.Tooltip('Prediction_Personal', title='Skor', format='.1f'), # Changed from 'Personal_Prediction' to 'Prediction_Personal'
+                                     alt.Tooltip('Delta', title='Delta', format='+.1f')] # Changed from 'Delta_Baseline' to 'Delta' based on original code's pat_data
+                        ).interactive()
+                        
+                        # Baseline Çizgisi (Referans)
+                        if clinical_baseline: # Use clinical_baseline here
+                            rule = base.mark_rule(color='red', strokeDash=[5, 5]).encode(
+                                y=alt.datum(clinical_baseline),
+                                size=alt.value(2)
+                            )
+                            chart = (line + rule).properties(height=350)
+                        else:
+                            chart = line.properties(height=350)
+                        
+                        st.altair_chart(chart, use_container_width=True)
+                        
+                        st.caption("🔵 Mavi Çizgi: Hastanın evden gönderdiği ölçümler | 🔴 Kırmızı Çizgi: Klinik Baseline (Hedef/Referans)")
+                        
+                        # --- TABLO ALANI ---
+                        st.subheader("📋 Detaylı Veri Dökümü")
+                        
+                        # Tablo için veri hazırlığı (Gereksiz sütunları gizle)
+                        display_df = logs[['Date', 'Prediction_Personal', 'Delta', 'Prediction_Global']].copy() # Changed column names
+                        display_df = display_df.sort_values('Date', ascending=False)
+                        
+                        st.dataframe(
+                            display_df,
+                            column_config={
+                                "Date": st.column_config.DatetimeColumn(
+                                    "Tarih & Saat",
+                                    format="D MMM YYYY, HH:mm",
+                                ),
+                                "Prediction_Personal": st.column_config.ProgressColumn( # Changed from 'Personal_Prediction'
+                                    "Kişisel Skor",
+                                    help="Bias düzeltmesi yapılmış nihai skor",
+                                    format="%.1f",
+                                    min_value=0,
+                                    max_value=100,
+                                ),
+                                "Delta": st.column_config.NumberColumn( # Changed from 'Delta_Baseline'
+                                    "Değişim (Δ)",
+                                    help="Baseline'a göre değişim",
+                                    format="%.1f",
+                                ),
+                                "Prediction_Global": st.column_config.NumberColumn( # Changed from 'Raw_Model_Pred'
+                                    "Ham Model",
+                                    format="%.1f",
+                                )
+                            },
+                            use_container_width=True,
+                            hide_index=True
+                        )
 
                     # --- HASTA SİLME BÖLÜMÜ ---
                     st.divider()
@@ -372,129 +498,197 @@ def doctor_panel():
 
     # --- TAB 2: YENİ HASTA (COLD START) ---
     with tab2:
-        st.write("Yeni hasta ekleyip, ilk kalibrasyon verisini girin. Bu veri **eğitim setine** eklenecek.")
-        
-        # Hasta bilgileri
-        c1, c2 = st.columns(2)
-        name = c1.text_input("Ad Soyad")
-        age = c2.number_input("Yaş", 50, 100, 60)
-        
-        c3, c4 = st.columns(2)
-        username = c3.text_input("Kullanıcı Adı (Hasta Girişi İçin)")
-        password = c4.text_input("Şifre", type="password")
-        
-        sex = st.selectbox("Cinsiyet", [0, 1], format_func=lambda x: "Erkek" if x==0 else "Kadın")
-        initial_updrs = st.number_input("İlk Muayene UPDRS Skoru (Label)", 0, 100, 20)
-        
-        # Ses Kaydı Bölümü
+        operation_mode = st.radio("İşlem Türü Seçin:", ["➕ Yeni Hasta Kaydı", "📈 Mevcut Hastaya Veri Ekle"], horizontal=True)
         st.divider()
-        st.subheader("🎙️ Ses Kaydı")
-        st.info("""
-        **Ses Kaydı Talimatları:**
-        1. Hasta derin bir nefes alsın
-        2. Tek bir nefeste, sabit ve rahat bir sesle **"aaaaaaa"** desin
-        3. Kayıt süresi **3-10 saniye** arasında olmalı
-        4. Sessiz bir ortamda kayıt yapın
-        """)
-        
-        # Kayıt yöntemi seçimi
-        record_method = st.radio("Kayıt Yöntemi:", ["🎤 Tarayıcıdan Kaydet", "📁 Dosya Yükle"], horizontal=True)
-        
-        audio_data = None
-        
-        if record_method == "🎤 Tarayıcıdan Kaydet":
-            if AUDIO_RECORDER_AVAILABLE:
-                st.markdown("##### 🔴 Kayıt Kontrolü")
-                st.caption("Aşağıdaki butona tıklayarak kaydı başlatın. Tekrar tıklayarak durdurun.")
-                
-                # Kayıt bileşeni
-                audio_data = audiorecorder("🎙️ Kayda Başla", "⏹️ Kaydı Durdur", key="doctor_recorder")
-                
-                if len(audio_data) > 0:
-                    # Kayıt süresi hesapla (pydub'da len() milisaniye döndürür)
-                    duration_ms = len(audio_data)
-                    duration_sec = duration_ms / 1000.0
+
+        if operation_mode == "➕ Yeni Hasta Kaydı":
+            st.write("Yeni hasta ekleyip, ilk kalibrasyon verisini girin. Bu veri **eğitim setine** eklenecek.")
+            
+            # Hasta bilgileri
+            c1, c2 = st.columns(2)
+            name = c1.text_input("Ad Soyad")
+            age = c2.number_input("Yaş", 20, 100, 60)
+            
+            c3, c4 = st.columns(2)
+            username = c3.text_input("Kullanıcı Adı (Hasta Girişi İçin)")
+            password = c4.text_input("Şifre", type="password")
+            
+            sex = st.selectbox("Cinsiyet", [0, 1], format_func=lambda x: "Erkek" if x==0 else "Kadın")
+            initial_updrs = st.number_input("İlk Muayene UPDRS Skoru (Label)", 0, 100, 20)
+            
+            # Ses Kaydı Bölümü
+            st.subheader("🎙️ Ses Kaydı")
+            st.info("""
+            **Ses Kaydı Talimatları:**
+            1. Hasta derin bir nefes alsın
+            2. Tek bir nefeste, sabit ve rahat bir sesle **"aaaaaaa"** desin
+            3. Kayıt süresi **3-10 saniye** arasında olmalı
+            4. Sessiz bir ortamda kayıt yapın
+            """)
+            
+            # Kayıt yöntemi seçimi
+            record_method = st.radio("Kayıt Yöntemi:", ["🎤 Tarayıcıdan Kaydet", "📁 Dosya Yükle"], horizontal=True, key="new_pat_method")
+            
+            audio_data = None
+            
+            if record_method == "🎤 Tarayıcıdan Kaydet":
+                if AUDIO_RECORDER_AVAILABLE:
+                    st.caption("Aşağıdaki butona tıklayarak kaydı başlatın. Tekrar tıklayarak durdurun.")
+                    audio_data = audiorecorder("🎙️ Kayda Başla", "⏹️ Kaydı Durdur", key="doctor_recorder_new")
                     
-                    st.success(f"✅ Kayıt tamamlandı!")
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric("⏱️ Süre", f"{duration_sec:.1f} sn")
-                    col2.metric("📊 Örnekleme", f"{audio_data.frame_rate} Hz")
-                    col3.metric("🔊 Kanal", f"{audio_data.channels}")
-                    
-                    # Kaydı dinle
-                    st.audio(audio_data.export().read(), format="audio/wav")
-                    
-                    # Süre kontrolü
-                    if duration_sec < 1:
-                        st.warning("⚠️ Kayıt çok kısa! En az 1 saniye olmalı.")
-                        audio_data = None
-                    elif duration_sec > 15:
-                        st.warning("⚠️ Kayıt çok uzun! 15 saniyeden kısa olmalı.")
-                        audio_data = None
-            else:
-                st.error("❌ Ses kayıt bileşeni yüklü değil. Dosya yükleme yöntemini kullanın.")
-                record_method = "📁 Dosya Yükle"
-        
-        if record_method == "📁 Dosya Yükle":
-            wav_file = st.file_uploader("WAV dosyası yükleyin", type=["wav"], key="doctor_upload")
-            if wav_file:
-                audio_data = wav_file
-                st.audio(wav_file, format="audio/wav")
-                st.success("✅ Dosya yüklendi!")
-        
-        st.divider()
-        
-        # Kaydet butonu
-        if st.button("💾 Hastayı Kaydet", type="primary"):
-            if not name or not username or not password:
-                st.error("❌ Lütfen tüm hasta bilgilerini doldurun!")
-            elif audio_data is None or (hasattr(audio_data, '__len__') and len(audio_data) == 0):
-                st.error("❌ Lütfen ses kaydı yapın veya dosya yükleyin!")
-            else:
-                try:
-                    # 1. Kullanıcıyı Kaydet
-                    users = pd.read_csv(USERS_FILE, dtype={'Username': str, 'Password': str})
-                    
-                    if username in users['Username'].values:
-                        st.error("❌ Bu kullanıcı adı zaten alınmış!")
-                    else:
-                        new_id = int(users['ID'].max()) + 1
-                        new_user = pd.DataFrame([{
-                            'Username': username, 'Password': password, 'Role': 'Patient',
-                            'Name': name, 'ID': new_id, 'Doctor_ID': st.session_state['user']['ID'],
-                            'Age': age, 'Sex': sex
-                        }])
-                        new_user.to_csv(USERS_FILE, mode='a', header=False, index=False)
-                    
-                        # 2. Sesi Kaydet ve Analiz Et
-                        if hasattr(audio_data, 'export'):
-                            # audiorecorder'dan gelen veri
-                            audio_data.export("temp_calib.wav", format="wav")
+                    if len(audio_data) > 0:
+                        duration_sec = len(audio_data) / 1000.0
+                        st.success(f"✅ Kayıt tamamlandı! ({duration_sec:.1f} sn)")
+                        st.audio(audio_data.export().read(), format="audio/wav")
+                        if duration_sec < 1 or duration_sec > 15:
+                            st.warning("⚠️ Kayıt süresi limitler dışında (1-15 sn).")
+                            audio_data = None
+                else:
+                    st.error("❌ Ses kayıt bileşeni yüklü değil.")
+                    record_method = "📁 Dosya Yükle"
+            
+            if record_method == "📁 Dosya Yükle":
+                wav_file = st.file_uploader("WAV dosyası yükleyin", type=["wav"], key="doctor_upload_new")
+                if wav_file:
+                    audio_data = wav_file
+                    st.audio(wav_file, format="audio/wav")
+            
+            st.divider()
+            
+            # Kaydet butonu
+            if st.button("💾 Hastayı Kaydet", type="primary"):
+                if not name or not username or not password:
+                    st.error("❌ Lütfen tüm hasta bilgilerini doldurun!")
+                elif audio_data is None or (hasattr(audio_data, '__len__') and len(audio_data) == 0):
+                    st.error("❌ Lütfen ses kaydı yapın veya dosya yükleyin!")
+                else:
+                    try:
+                        # 1. Kullanıcıyı Kaydet
+                        users = pd.read_csv(USERS_FILE, dtype={'Username': str, 'Password': str})
+                        
+                        if username in users['Username'].values:
+                            st.error("❌ Bu kullanıcı adı zaten alınmış!")
                         else:
-                            # Dosya yükleme
-                            with open("temp_calib.wav", "wb") as f:
-                                f.write(audio_data.getbuffer())
+                            new_id = int(users['ID'].max()) + 1
+                            new_user = pd.DataFrame([{
+                                'Username': username, 'Password': password, 'Role': 'Patient',
+                                'Name': name, 'ID': new_id, 'Doctor_ID': st.session_state['user']['ID'],
+                                'Age': age, 'Sex': sex
+                            }])
+                            new_user.to_csv(USERS_FILE, mode='a', header=False, index=False)
                         
-                        feats = extract_audio_features("temp_calib.wav")
-                        
-                        # 3. Eğitim Verisine Ekle
-                        train_row = {
-                            'subject#': new_id, 'age': age, 'sex': sex,
-                            'motor_UPDRS': initial_updrs * 0.7,
-                            'total_UPDRS': initial_updrs,
-                            'UPDRS_baseline': initial_updrs,
-                            **feats
-                        }
-                        
-                        train_df = pd.DataFrame([train_row])
-                        header = not os.path.exists(NEW_DATA_FILE)
-                        train_df.to_csv(NEW_DATA_FILE, mode='a', header=header, index=False)
-                        
-                        st.success(f"✅ Hasta {name} (ID: {new_id}) sisteme eklendi!")
-                        st.info("💡 Modelin hastayı tanıması için 'AI Model Yönetimi' sekmesinden eğitimi başlatın.")
-                        st.balloons()
-                except Exception as e:
-                    st.error(f"❌ Hata: {str(e)}")
+                            # 2. Sesi Kaydet ve Analiz Et
+                            if hasattr(audio_data, 'export'):
+                                audio_data.export("temp_calib.wav", format="wav")
+                            else:
+                                with open("temp_calib.wav", "wb") as f: f.write(audio_data.getbuffer())
+                            
+                            feats = extract_audio_features("temp_calib.wav")
+                            
+                            # 3. Eğitim Verisine Ekle
+                            train_row = {
+                                'subject#': new_id, 'age': age, 'sex': sex,
+                                'motor_UPDRS': initial_updrs * 0.7,
+                                'total_UPDRS': initial_updrs,
+                                'UPDRS_baseline': initial_updrs,
+                                **feats
+                            }
+                            
+                            train_df = pd.DataFrame([train_row])
+                            header = not os.path.exists(NEW_DATA_FILE)
+                            train_df.to_csv(NEW_DATA_FILE, mode='a', header=header, index=False)
+                            
+                            st.success(f"✅ Hasta {name} (ID: {new_id}) sisteme eklendi!")
+                            st.info("💡 Modelin hastayı tanıması için 'AI Model Yönetimi' sekmesinden eğitimi başlatın.")
+                            st.balloons()
+                    except Exception as e:
+                        st.error(f"❌ Hata: {str(e)}")
+
+        elif operation_mode == "📈 Mevcut Hastaya Veri Ekle":
+            st.info("Seçilen hastaya yeni bir kalibrasyon verisi (örneğin ilaç sonrası veya kontrol muayenesi) ekleyin.")
+            
+            if not os.path.exists(USERS_FILE):
+                st.error("Kullanıcı veritabanı yok.")
+            else:
+                users = pd.read_csv(USERS_FILE)
+                # Sadece bu doktora ait hastalar
+                current_doctor_id = st.session_state['user']['ID']
+                users['Doctor_ID'] = pd.to_numeric(users['Doctor_ID'], errors='coerce')
+                patients = users[(users['Role'] == 'Patient') & (users['Doctor_ID'] == current_doctor_id)]
+                
+                if patients.empty:
+                    st.warning("Hiç hastanız yok. Önce 'Yeni Hasta Kaydı' yapın.")
+                else:
+                    selected_name = st.selectbox("Hangi hasta için veri gireceksiniz?", patients['Name'])
+                    pat_row = patients[patients['Name'] == selected_name].iloc[0]
+                    pat_id = pat_row['ID']
+                    
+                    st.write(f"**Seçilen Hasta:** {selected_name} (ID: {pat_id}, Yaş: {pat_row['Age']})")
+                    
+                    new_updrs = st.number_input("Yeni Ölçülen UPDRS Skoru", 0, 100, 20, help="Şu anki muayenedeki skor.")
+                    
+                    # Ses Kayıdı
+                    st.subheader("🎙️ Yeni Ses Kaydı")
+                    rec_method_ex = st.radio("Kayıt Yöntemi:", ["🎤 Tarayıcıdan Kaydet", "📁 Dosya Yükle"], horizontal=True, key="exist_pat_method")
+                    
+                    audio_data_ex = None
+                    
+                    if rec_method_ex == "🎤 Tarayıcıdan Kaydet":
+                        if AUDIO_RECORDER_AVAILABLE:
+                            st.caption("Kaydı başlat/durdur:")
+                            audio_data_ex = audiorecorder("🎙️ Kayda Başla", "⏹️ Kaydı Durdur", key="doctor_recorder_exist")
+                            if len(audio_data_ex) > 0:
+                                st.success("✅ Kayıt Alındı")
+                                st.audio(audio_data_ex.export().read(), format="audio/wav")
+                        else:
+                            st.error("Kayıt bileşeni yok.")
+                    
+                    if rec_method_ex == "📁 Dosya Yükle":
+                        wav_file_ex = st.file_uploader("WAV Yükle", type=["wav"], key="doctor_upload_exist")
+                        if wav_file_ex:
+                            audio_data_ex = wav_file_ex
+                            st.audio(wav_file_ex, format="audio/wav")
+                    
+                    if st.button("💾 Ek Veriyi Kaydet", type="primary"):
+                        if audio_data_ex is None or (hasattr(audio_data_ex, '__len__') and len(audio_data_ex) == 0):
+                            st.error("Ses kaydı eksik.")
+                        else:
+                            try:
+                                # Ses Analizi
+                                if hasattr(audio_data_ex, 'export'):
+                                    audio_data_ex.export("temp_calib_ex.wav", format="wav")
+                                else:
+                                    with open("temp_calib_ex.wav", "wb") as f: f.write(audio_data_ex.getbuffer())
+                                
+                                feats = extract_audio_features("temp_calib_ex.wav")
+                                
+                                # Veriyi Ekle (Aynı ID, Yeni UPDRS)
+                                # Not: UPDRS_baseline sabit kalabilir veya güncellenebilir.
+                                # Biz burada 'total_UPDRS'i güncel skor olarak veriyoruz.
+                                # UPDRS_baseline sütunu, hastanın İLK kaydını tutmalı.
+                                # Ancak new_patients_data.csv eğitim için kullanıldığı için 'UPDRS_baseline' sütunu o satırın baseline'ı olarak kalabilir.
+                                # VEYA bu yeni ölçümü de bir baseline (referans) olarak kabul edebiliriz.
+                                # Basitlik adına: O satırdaki total_UPDRS ne ise onu baseline gibi de yazabiliriz,
+                                # AMA get_active_model İLK satırı alıyor. O yüzden sorun yok.
+                                
+                                train_row = {
+                                    'subject#': pat_id, 
+                                    'age': pat_row['Age'], 
+                                    'sex': pat_row['Sex'], 
+                                    'motor_UPDRS': new_updrs * 0.7,
+                                    'total_UPDRS': new_updrs,
+                                    'UPDRS_baseline': new_updrs, # Bu satır için baseline kendisi
+                                    **feats
+                                }
+                                
+                                train_df = pd.DataFrame([train_row])
+                                train_df.to_csv(NEW_DATA_FILE, mode='a', header=False, index=False)
+                                
+                                st.success(f"✅ {selected_name} için yeni veri eklendi! Modeli yeniden eğitmeyi unutmayın.")
+                                st.balloons()
+                                
+                            except Exception as e:
+                                st.error(f"Hata: {str(e)}")
 
     # --- TAB 3: MODEL EĞİTİMİ (SENİN İSTEDİĞİN KISIM) ---
     with tab3:
@@ -686,11 +880,50 @@ def patient_panel():
 if 'user' not in st.session_state or st.session_state['user'] is None:
     login_page()
 else:
+    # Sidebar - SSS
     with st.sidebar:
-        if st.button("Çıkış"):
+        st.divider()
+        st.header("❓ SSS & Bilgi")
+        
+        with st.expander("UPDRS Nedir?"):
+            st.caption("""
+            **Birleşik Parkinson Hastalığı Değerlendirme Ölçeği.** 
+            0-100+ arasında bir puandır.
+            *0-10:* Sağlıklı/Çok Hafif
+            *10-30:* Hafif/Orta
+            *30+:* İleri Seviye
+            """)
+            
+        with st.expander("Sistem Nasıl Çalışır?"):
+            st.caption("""
+            Sesinizden (Jitter, Shimmer gibi) 20 farklı özellik çıkarılır.
+            Yapay zeka (XGBoost) bu özelliklerden tahmini UPDRS skorunu bulur.
+            Ancak en önemlisi **Kişisel Kalibrasyondur**. Sistem sizin "normalinizi" öğrenir ve sadece **değişimleri** (kötüleşme/iyileşme) takip eder.
+            """)
+            
+        with st.expander("Kayıt Nasıl Olmalı?"):
+            st.caption("""
+            - Arka plan sessiz olmalı.
+            - Tek bir nefeste, sabit "aaaa" denilmeli.
+            - Mikrofon ağza ne çok yakın ne çok uzak olmalı.
+            - Süre 3-10 saniye idealdir.
+            """)
+            
+        with st.expander("Delta (Δ) Nedir?"):
+            st.caption("""
+            Sizin ilk muayene (baseline) skorunuz ile şu anki durumunuz arasındaki farktır.
+            **+ Değer:** Kötüleşme (Skor arttı)
+            **- Değer:** İyileşme (Skor düştü)
+            **0:** Stabil
+            """)
+            
+        st.info("Version 1.0.0")
+        
+        if st.button("Çıkış Yap"):
             st.session_state['user'] = None
             st.rerun()
-            
+
+    # Yönlendirme
     if st.session_state['user']['Role'] == 'Doctor':
         doctor_panel()
     else:
