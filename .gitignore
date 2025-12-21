@@ -14,7 +14,7 @@ temp_pat.wav
 
 # Project Specific - Data & Security
 patient_recordings/
-users_db.csv
+# users_db.csv
 new_patients_data.csv
 patient_logs.csv
 patient_logs_backup.csv

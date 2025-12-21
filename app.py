@@ -49,10 +49,11 @@ def init_system():
     
     # 2. Yeni Veri Deposu (Cold Start Çözümü)
     if not os.path.exists(NEW_DATA_FILE):
-        # Orijinal veri setinin sütun yapısını kopyala ama boş oluştur
-        if os.path.exists(ORIGINAL_DATA):
-            df = pd.read_csv(ORIGINAL_DATA, nrows=1)
-            pd.DataFrame(columns=df.columns).to_csv(NEW_DATA_FILE, index=False)
+        # Define full header including UPDRS_baseline
+        CSV_HEADER = "subject#,age,sex,test_time,motor_UPDRS,total_UPDRS,UPDRS_baseline,Jitter(%),Jitter(Abs),Jitter:RAP,Jitter:PPQ5,Jitter:DDP,Shimmer,Shimmer(dB),Shimmer:APQ3,Shimmer:APQ5,Shimmer:APQ11,Shimmer:DDA,NHR,HNR,RPDE,DFA,PPE"
+        with open(NEW_DATA_FILE, 'w') as f:
+            f.write(CSV_HEADER + '\n')
+        st.success('Yeni veri dosyası oluşturuldu ve başlık eklendi.')
 
 init_system()
 
@@ -337,7 +338,7 @@ def doctor_panel():
                         clinical_data = pd.read_csv(NEW_DATA_FILE)
                         patient_clinical = clinical_data[clinical_data['subject#'] == pat_id]
                         if not patient_clinical.empty:
-                            clinical_baseline = patient_clinical['total_UPDRS'].values[0]
+                            clinical_baseline = patient_clinical['UPDRS_baseline'].values[0]
                     except Exception:
                         pass
                 
@@ -586,18 +587,43 @@ def doctor_panel():
                             
                             feats = extract_audio_features("temp_calib.wav")
                             
-                            # 3. Eğitim Verisine Ekle
-                            train_row = {
-                                'subject#': new_id, 'age': age, 'sex': sex,
-                                'motor_UPDRS': initial_updrs * 0.7,
-                                'total_UPDRS': initial_updrs,
-                                'UPDRS_baseline': initial_updrs,
-                                **feats
-                            }
+                            # 3. Eğitim Verisine Ekle (SÜTUN SIRASI GARANTİLİ)
+                            # Header tanımı (Orijinal UCI + bizim eklediğimiz UPDRS_baseline)
+                            CSV_HEADER = "subject#,age,sex,test_time,motor_UPDRS,total_UPDRS,UPDRS_baseline,Jitter(%),Jitter(Abs),Jitter:RAP,Jitter:PPQ5,Jitter:DDP,Shimmer,Shimmer(dB),Shimmer:APQ3,Shimmer:APQ5,Shimmer:APQ11,Shimmer:DDA,NHR,HNR,RPDE,DFA,PPE"
                             
-                            train_df = pd.DataFrame([train_row])
-                            header = not os.path.exists(NEW_DATA_FILE)
-                            train_df.to_csv(NEW_DATA_FILE, mode='a', header=header, index=False)
+                            # Değerler (Header sırasıyla birebir eşleşmeli)
+                            row_values = [
+                                new_id,                         # subject#
+                                age,                            # age
+                                sex,                            # sex
+                                0,                              # test_time
+                                round(initial_updrs * 0.7, 2),  # motor_UPDRS
+                                initial_updrs,                  # total_UPDRS
+                                initial_updrs,                  # UPDRS_baseline
+                                feats.get('Jitter(%)', 0),
+                                feats.get('Jitter(Abs)', 0),
+                                feats.get('Jitter:RAP', 0),
+                                feats.get('Jitter:PPQ5', 0),
+                                feats.get('Jitter:DDP', 0),
+                                feats.get('Shimmer', 0),
+                                feats.get('Shimmer(dB)', 0),
+                                feats.get('Shimmer:APQ3', 0),
+                                feats.get('Shimmer:APQ5', 0),
+                                feats.get('Shimmer:APQ11', 0),
+                                feats.get('Shimmer:DDA', 0),
+                                feats.get('NHR', 0),
+                                feats.get('HNR', 0),
+                                feats.get('RPDE', 0.4),
+                                feats.get('DFA', 0.6),
+                                feats.get('PPE', 0.2)
+                            ]
+                            
+                            # Dosya yoksa header yaz, sonra veriyi ekle
+                            file_exists = os.path.exists(NEW_DATA_FILE)
+                            with open(NEW_DATA_FILE, 'a') as f:
+                                if not file_exists:
+                                    f.write(CSV_HEADER + '\n')
+                                f.write(','.join(map(str, row_values)) + '\n')
                             
                             st.success(f"✅ Hasta {name} (ID: {new_id}) sisteme eklendi!")
                             st.info("💡 Modelin hastayı tanıması için 'AI Model Yönetimi' sekmesinden eğitimi başlatın.")
@@ -663,27 +689,38 @@ def doctor_panel():
                                 
                                 feats = extract_audio_features("temp_calib_ex.wav")
                                 
-                                # Veriyi Ekle (Aynı ID, Yeni UPDRS)
-                                # Not: UPDRS_baseline sabit kalabilir veya güncellenebilir.
-                                # Biz burada 'total_UPDRS'i güncel skor olarak veriyoruz.
-                                # UPDRS_baseline sütunu, hastanın İLK kaydını tutmalı.
-                                # Ancak new_patients_data.csv eğitim için kullanıldığı için 'UPDRS_baseline' sütunu o satırın baseline'ı olarak kalabilir.
-                                # VEYA bu yeni ölçümü de bir baseline (referans) olarak kabul edebiliriz.
-                                # Basitlik adına: O satırdaki total_UPDRS ne ise onu baseline gibi de yazabiliriz,
-                                # AMA get_active_model İLK satırı alıyor. O yüzden sorun yok.
+                                # Veriyi Ekle (SÜTUN SIRASI GARANTİLİ)
+                                CSV_HEADER = "subject#,age,sex,test_time,motor_UPDRS,total_UPDRS,UPDRS_baseline,Jitter(%),Jitter(Abs),Jitter:RAP,Jitter:PPQ5,Jitter:DDP,Shimmer,Shimmer(dB),Shimmer:APQ3,Shimmer:APQ5,Shimmer:APQ11,Shimmer:DDA,NHR,HNR,RPDE,DFA,PPE"
                                 
-                                train_row = {
-                                    'subject#': pat_id, 
-                                    'age': pat_row['Age'], 
-                                    'sex': pat_row['Sex'], 
-                                    'motor_UPDRS': new_updrs * 0.7,
-                                    'total_UPDRS': new_updrs,
-                                    'UPDRS_baseline': new_updrs, # Bu satır için baseline kendisi
-                                    **feats
-                                }
+                                row_values = [
+                                    pat_id,                          # subject#
+                                    pat_row['Age'],                  # age
+                                    pat_row['Sex'],                  # sex
+                                    0,                               # test_time
+                                    round(new_updrs * 0.7, 2),       # motor_UPDRS
+                                    new_updrs,                       # total_UPDRS
+                                    new_updrs,                       # UPDRS_baseline
+                                    feats.get('Jitter(%)', 0),
+                                    feats.get('Jitter(Abs)', 0),
+                                    feats.get('Jitter:RAP', 0),
+                                    feats.get('Jitter:PPQ5', 0),
+                                    feats.get('Jitter:DDP', 0),
+                                    feats.get('Shimmer', 0),
+                                    feats.get('Shimmer(dB)', 0),
+                                    feats.get('Shimmer:APQ3', 0),
+                                    feats.get('Shimmer:APQ5', 0),
+                                    feats.get('Shimmer:APQ11', 0),
+                                    feats.get('Shimmer:DDA', 0),
+                                    feats.get('NHR', 0),
+                                    feats.get('HNR', 0),
+                                    feats.get('RPDE', 0.4),
+                                    feats.get('DFA', 0.6),
+                                    feats.get('PPE', 0.2)
+                                ]
                                 
-                                train_df = pd.DataFrame([train_row])
-                                train_df.to_csv(NEW_DATA_FILE, mode='a', header=False, index=False)
+                                # Append (dosya zaten var olmalı)
+                                with open(NEW_DATA_FILE, 'a') as f:
+                                    f.write(','.join(map(str, row_values)) + '\n')
                                 
                                 st.success(f"✅ {selected_name} için yeni veri eklendi! Modeli yeniden eğitmeyi unutmayın.")
                                 st.balloons()
