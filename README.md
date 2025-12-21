@@ -1,77 +1,77 @@
-# 🧠 Parkinson AI Telemonitoring System
+# Parkinson AI Telemonitoring System
 
-Bu proje, Parkinson hastalarının ses kayıtlarını analiz ederek **UPDRS (Unified Parkinson's Disease Rating Scale)** skorunu tahmin eden yapay zeka destekli bir telemonitoring sistemidir.
+Bu proje, Parkinson hastalarının hastalık seyrini (UPDRS skorunu) ses analizi ve yapay zeka kullanarak uzaktan takip etmeyi sağlayan bir tele-tıp uygulamasıdır. Sistem, doktorların hastalarını yönetebileceği, verileri etiketleyebileceği ve hastaların evlerinden ses kaydı göndererek durumlarını izleyebileceği entegre bir platform sunar.
 
-##  Özellikler
+## Temel Ozellikler
 
-- **Çift Arayüz:** Doktorlar ve hastalar için özelleştirilmiş paneller.
-- **AI Model:** XGBoost tabanlı regresyon modeli (UCI Parkinson Dataset ile eğitilmiş).
-- **Kişisel Kalibrasyon (Personal Bias Layer):** Her hasta için doktorun belirlediği klinik baseline değerine göre modeli kalibre eder.
-- **Anomali Tespiti:** Beklenmedik iyileşme veya hızlı kötüleşme durumlarını tespit edip uyarır.
-- **Ses Analizi:** Praat (Parselmouth) kütüphanesi ile Jitter, Shimmer, HNR gibi biyobelirteçleri çıkarır.
-- **Güvenli Kayıt:** Hasta ses kayıtları yerel olarak arşivlenir.
+### 1. Yapay Zeka Tabanli Ses Analizi
+Sistem, kullanicidan alinan ham ses verisini (WAV) isleyerek 20'den fazla akustik oznitelik cikarir. Bu oznitelikler arasinda Jitter, Shimmer, HNR, RPDE, DFA ve PPE gibi Parkinson hastaligi ile iliskili vokal biyobelirtecler bulunur.
+XGBoost regresyon modeli, bu ozellikleri kullanarak hastanin UPDRS (Unified Parkinson's Disease Rating Scale) skorunu tahmin eder.
 
-## 🛠️ Kurulum
+### 2. Kisisel Kalibrasyon ve Bias Katmani
+Her insanin ses yapisi farklidir. Sistem, genel bir model kullanmak yerine her hasta icin "Kisisel Bias" (Sapma) hesaplar.
+- **Ilk Kalibrasyon:** Doktor, klinikte hastanin gercek UPDRS skorunu girer ve ses kaydi alir. Modelin tahmini ile gercek skor arasindaki fark (Bias) kaydedilir.
+- **Evden Takip:** Hasta evden ses gonderdiginde, modelin ham tahmini bu bias degeri ile duzeltilir. Bu sayede model hatasi minimize edilir ve hastanin kisisel degisimi (Delta) dogru bir sekilde izlenir.
 
-### 1. Gereksinimler
-- Python 3.8+
-- Sanal ortam (önerilir)
+### 3. Surekli Ogrenme (Continuous Learning)
+Doktorlar, mevcut bir hasta icin farkli zamanlarda (ornegin ilac aldiktan sonra veya kontrol muayenelerinde) yeni veri girisleri yapabilir. Bu veriler egitim setine eklenir ve model yeniden egitildiginde, sistem o hastanin ses karakteristiklerini ve hastaligin farkli evrelerini ogrenir. Bu yontemle model zamanla kisisellesir.
 
-### 2. Bağımlılıkları Yükleyin
+### 4. Coklu Kullanici ve Rol Yonetimi (Multi-Tenancy)
+- **Doktor Paneli:** Doktorlar sadece kendi ekledikleri hastalari gorur ve yonetir. Hasta ekleme, veri girisi, model egitimi ve hasta takibi bu panelden yapilir.
+- **Hasta Paneli:** Hastalar kendi kullanici adi ve sifreleri ile giris yaparak ses kaydi gonderebilir ve gecmis olcumlerini grafiksel olarak izleyebilir.
 
-```bash
-# Sanal ortam oluştur (Opsiyonel)
-python -m venv venv
-source venv/bin/activate  # Mac/Linux
-# venv\Scripts\activate  # Windows
+## Kurulum ve Calistirma
 
-# Paketleri yükle
-pip install streamlit pandas numpy xgboost praat-parselmouth scikit-learn audiorecorder
-```
+### Gereksinimler
+- Python 3.9 veya uzeri
+- Sanal ortam (Virtualenv) onerilir.
 
-### 3. Uygulamayı Başlatın
+### Kurulum Adimlari
 
-```bash
-streamlit run app.py
-```
+1. Proje dizinine gidin ve sanal ortami olusturun:
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate  # Mac/Linux
+   # venv\Scripts\activate   # Windows
+   ```
 
-##  Giriş Bilgileri (Demo)
+2. Gerekli kutuphaneleri yukleyin:
+   ```bash
+   pip install -r requirements.txt
+   ```
+   *Not: Ses analizi icin `parselmouth` (Praat) ve `audiorecorder` kutuphaneleri gereklidir.*
 
-Sistemi test etmek için aşağıdaki demo hesaplarını kullanabilirsiniz:
+3. Uygulamayi baslatin:
+   ```bash
+   streamlit run app.py
+   ```
 
-| Rol | Kullanıcı Adı | Şifre |
-|---|---|---|
-| **Doktor** | `doktor` | `123` |
-| **Hasta** | `ali` | `123` |
+## Kullanim Senaryosu (Klinik Protokol)
 
-Doktor panelinden yeni hastalar oluşturabilirsiniz.
+Sistemin en yuksek basarimla calismasi icin asagidaki protokol onerilir:
 
-## Proje Yapısı
+1. **Ilk Muayene (Baseline):** Doktor, hastayi sisteme ekler. Klinik UPDRS skorunu girer ve ilk ses kaydini alir. "Sistemi Yeniden Egit" butonuna basilarak model hastayi tanir.
+2. **Ilac Etkisi (Opsiyonel):** Doktor, "Mevcut Hastaya Veri Ekle" secenegi ile hastanin ilac aldiktan sonraki (ON donemi) sesini ve skorunu sisteme girer. Model hastanin hem ilacli hem ilacsiz durumunu ogrenir.
+3. **Evden Takip:** Hasta, kendisine verilen sifre ile sisteme girer. Belirli araliklarla (ornegin haftada bir) ses kaydi gonderir. Sistem, kisisellestirilmis tahmini ve baseline'a gore degisimi (Delta) raporlar.
+4. **Kontrol:** Doktor panelinden hastanin zaman icindeki degisim grafigi incelenir.
 
-```
-parkinson-final/
-├── app.py                  # Ana uygulama dosyası (Streamlit)
-├── users_db.csv            # Kullanıcı veritabanı
-├── patient_logs.csv        # Tahmin geçmişi ve loglar
-├── new_patients_data.csv   # Yeni eklenen hastaların klinik verileri (Eğitim için)
-├── scaler.pkl              # Normalizasyon ölçekleyicisi
-├── feature_cols.json       # Eğitilen modelin öznitelik listesi
-├── trained_model.json      # Eğitilmiş XGBoost modeli
-└── patient_recordings/     # Arşivlenen ses dosyaları (Git'e dahil edilmez)
-```
+## Teknik Yapi
 
-## Nasıl Çalışır?
+- **Backend/Frontend:** Streamlit
+- **Veri Isleme:** Pandas, NumPy
+- **Makine Ogrenmesi:** XGBoost (Regressor), Scikit-learn
+- **Ses Isleme:** Praat (Parselmouth), Pydub
+- **Gorsellestirme:** Altair
 
-1. **Eğitim:** Sistem, UCI Parkinson veri seti ve doktorun girdiği yeni hasta verileriyle eğitilir (`train_model`).
-2. **Kişiselleştirme:** Model **mutlak UPDRS** tahmini yapar. Ancak her hastanın ses karakteristiği farklı olduğu için, doktorun ilk ölçümüne göre bir **Bias (Sapma)** hesaplanır.
-3. **Tahmin:** Hasta evden ses gönderdiğinde:
-   `Final Skor = Global Model Tahmini + Kişisel Bias`
-   formülüyle sonuç üretilir.
+## Dosya Yapisi
 
-##  Notlar
+- `app.py`: Ana uygulama kodu.
+- `users_db.csv`: Kullanici veritabani (Sifreli saklama onerilir).
+- `patient_logs.csv`: Hasta olcum gecmisi.
+- `new_patients_data.csv`: Modelin yeniden egitilmesi icin biriktirilen klinik veriler.
+- `patient_recordings/`: Kaydedilen ses dosyalari.
+- `feature_cols.json` & `scaler.pkl`: Modelin tutarliligi icin gerekli meta veriler.
 
-- Ses analizi için **Praat** yazılımının Python sarmalayıcısı olan `parselmouth` kullanılır.
-- Ses kayıtları `.gitignore` dosyası ile repodan hariç tutulmuştur (KVKK/Gizlilik).
+## Veri Guvenligi Notu
 
----
-**Geliştirici:** [Adınız/Ekibiniz]
+Ses dosyalari ve hasta verileri hassas icerik tasir. `.gitignore` dosyasi, bu verilerin versiyon kontrol sistemine (Git) gonderilmesini engellemek icin yapilandirilmistir. `patient_recordings/`, `*.csv` ve `__pycache__` dosyalari gonderilmez.
