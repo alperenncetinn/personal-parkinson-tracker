@@ -83,83 +83,218 @@ init_system()
 # 2. YAPAY ZENA MOTORU (EĞİTİM VE TAHMİN)
 # --------------------------------------------------------
 
+def augment_audio_features(df, augment_factor=3):
+    """
+    Ses özelliklerine veri artırma (Data Augmentation) uygular.
+    Gerçek ses dosyasını değiştirmek yerine, özellik değerlerine
+    kontrollü gürültü ekleyerek sentetik veri üretir.
+    
+    Bu yaklaşım:
+    - Overfitting'i azaltır
+    - Modelin genelleme kapasitesini artırır
+    - Az veriyle çalışırken daha robust sonuçlar verir
+    """
+    if len(df) == 0:
+        return df
+    
+    augmented_rows = []
+    
+    # Ses özellikleri (augmentation uygulanacak sütunlar)
+    audio_feature_cols = [
+        'Jitter(%)', 'Jitter(Abs)', 'Jitter:RAP', 'Jitter:PPQ5', 'Jitter:DDP',
+        'Shimmer', 'Shimmer(dB)', 'Shimmer:APQ3', 'Shimmer:APQ5', 'Shimmer:APQ11', 'Shimmer:DDA',
+        'NHR', 'HNR', 'RPDE', 'DFA', 'PPE'
+    ]
+    
+    for idx, row in df.iterrows():
+        # Orijinal satırı koru
+        augmented_rows.append(row)
+        
+        # Augmented versiyonlar oluştur
+        for i in range(augment_factor - 1):
+            new_row = row.copy()
+            
+            for col in audio_feature_cols:
+                if col in new_row.index and pd.notna(new_row[col]):
+                    original_val = float(new_row[col])
+                    # %5-15 arası rastgele gürültü ekle
+                    noise_factor = np.random.uniform(0.95, 1.05)
+                    # Ek olarak küçük bir Gaussian gürültü
+                    gaussian_noise = np.random.normal(0, abs(original_val) * 0.02)
+                    new_row[col] = original_val * noise_factor + gaussian_noise
+            
+            # test_time'ı da hafifçe değiştir (farklı zaman simülasyonu)
+            if 'test_time' in new_row.index:
+                new_row['test_time'] = float(new_row['test_time']) + np.random.uniform(-0.5, 0.5)
+            
+            augmented_rows.append(new_row)
+    
+    return pd.DataFrame(augmented_rows)
+
+
 def train_model():
     """
-    Eğitim fonksiyonu:
-    - Orijinal UCI data + yeni hasta verisini birleştirir
-    - subject# feature leakage'ını engeller
-    - Patient-wise split kullanır (aynı hasta train & test'te olmaz)
-    - MUTLAK UPDRS tahmin eder (delta değil)
-    - Model, scaler ve feature columns'u kaydeder
+    Geliştirilmiş Eğitim Fonksiyonu (Overfitting Önleme):
+    
+    1. Data Augmentation: Yeni hasta verilerine kontrollü gürültü ekleme
+    2. GroupShuffleSplit: Hasta bazlı train/test ayrımı (data leakage önleme)
+    3. Güçlü Regularization: reg_alpha ve reg_lambda artırıldı
+    4. Minimum Veri Kontrolü: Yetersiz veriyle eğitim uyarısı
+    5. Early Stopping: Overfitting tespiti için
     """
     status = st.empty()
-    status.info("🧠 Yapay Zeka Motoru: Veriler birleştiriliyor ve eğitim başlıyor...")
+    progress = st.progress(0)
+    status.info("🧠 Yapay Zeka Motoru: Veriler hazırlanıyor...")
     
-    # Verileri Yükle
+    # ========== 1. VERİ YÜKLEME ==========
     df_orig = pd.read_csv(ORIGINAL_DATA)
+    
+    new_patient_count = 0
+    new_record_count = 0
+    
     if os.path.exists(NEW_DATA_FILE):
         df_new = pd.read_csv(NEW_DATA_FILE)
-        # Birleştir (Concatenate)
-        full_data = pd.concat([df_orig, df_new], ignore_index=True)
+        new_record_count = len(df_new)
+        new_patient_count = df_new['subject#'].nunique() if not df_new.empty else 0
+        
+        # ========== MINIMUM VERİ KONTROLÜ ==========
+        MIN_RECORDS_FOR_TRAINING = 10
+        if new_record_count > 0 and new_record_count < MIN_RECORDS_FOR_TRAINING:
+            st.warning(f"""
+            ⚠️ **Yetersiz Veri Uyarısı**
+            
+            Şu an yeni hasta verisi sayısı: **{new_record_count}** kayıt
+            Önerilen minimum: **{MIN_RECORDS_FOR_TRAINING}** kayıt
+            
+            Az veriyle eğitim **overfitting** riskini artırır!
+            Devam etmek istiyorsanız 'Yine de Eğit' seçeneğini kullanın.
+            """)
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if not st.checkbox("⚠️ Riski kabul ediyorum, yine de eğit"):
+                    st.info("💡 Daha fazla hasta verisi ekledikten sonra tekrar deneyin.")
+                    return None, None
+        
+        # ========== 2. VERİ ARTIRMA (DATA AUGMENTATION) ==========
+        status.info("🔄 Veri artırma (augmentation) uygulanıyor...")
+        progress.progress(20)
+        
+        # Sadece YENİ hasta verilerine augmentation uygula
+        # Orijinal UCI verisi zaten yeterince büyük
+        if not df_new.empty:
+            augment_factor = max(3, 15 // max(1, new_record_count))  # Az veri = daha fazla augmentation
+            augment_factor = min(augment_factor, 5)  # Maksimum 5x
+            
+            df_new_augmented = augment_audio_features(df_new, augment_factor=augment_factor)
+            st.info(f"📈 Veri Artırma: {new_record_count} → {len(df_new_augmented)} kayıt ({augment_factor}x)")
+            
+            full_data = pd.concat([df_orig, df_new_augmented], ignore_index=True)
+        else:
+            full_data = df_orig
     else:
         full_data = df_orig
-
-    #  Feature Hazırlığı: subject# ÇIKARILACAK (feature leakage engellenir)
-    X = full_data.drop(['subject#', 'total_UPDRS', 'motor_UPDRS'], axis=1)
     
-    # Baseline/delta sütunları varsa çıkar (bunlar feature olmayacak)
+    progress.progress(30)
+    
+    # ========== 3. FEATURE HAZIRLIĞI ==========
+    status.info("🔧 Özellikler hazırlanıyor...")
+    
+    # subject# ÇIKARILACAK (feature leakage engellenir)
+    X = full_data.drop(['subject#', 'total_UPDRS', 'motor_UPDRS'], axis=1, errors='ignore')
+    
+    # Baseline/delta sütunları varsa çıkar
     cols_to_drop = [c for c in ['UPDRS_baseline', 'delta_UPDRS'] if c in X.columns]
     if cols_to_drop:
         X = X.drop(cols_to_drop, axis=1)
     
-    #  Hedef: MUTLAK total_UPDRS (delta değil)
+    # Hedef: MUTLAK total_UPDRS
     y = full_data['total_UPDRS']
     
-    #  Patient-wise split için group bilgisi
+    # Patient-wise split için group bilgisi
     groups = full_data['subject#']
-
-    #  NaN içeren satırları düş (özellik/etiket eksikleri modeli bozmasın)
+    
+    # NaN temizliği
     non_na_mask = X.notna().all(axis=1) & y.notna()
-    X = X.loc[non_na_mask]
-    y = y.loc[non_na_mask]
-    groups = groups.loc[non_na_mask]
-
-    #  Sayısal tiplere dönüştür (CSV okuma kaynaklı string tipler varsa)
+    X = X.loc[non_na_mask].reset_index(drop=True)
+    y = y.loc[non_na_mask].reset_index(drop=True)
+    groups = groups.loc[non_na_mask].reset_index(drop=True)
+    
+    # Sayısal tiplere dönüştür
     X = X.apply(pd.to_numeric, errors='coerce')
     y = pd.to_numeric(y, errors='coerce')
     
-    # Standart Random Split (Doktorun hastayı "tune" etmesi senaryosu)
-    # Bu yöntemle model, hastanın ses karakteristiğini eğitim setinde görür ve öğrenir.
-    # Sonuç: Yüksek R² ve kişiselleştirilmiş performans.
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    progress.progress(40)
     
-    # ℹ️ Dağılım Kontrolü (Log)
+    # ========== 4. HASTA BAZLI CROSS-VALIDATION (GroupShuffleSplit) ==========
+    status.info("🔀 Hasta bazlı train/test ayrımı yapılıyor (GroupShuffleSplit)...")
+    
+    # Benzersiz hasta sayısını kontrol et
+    unique_patients = groups.nunique()
+    
+    if unique_patients >= 5:
+        # GroupShuffleSplit: Aynı hasta ASLA hem train hem test'te olmaz
+        gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+        train_idx, test_idx = next(gss.split(X, y, groups))
+        
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+        
+        train_patients = groups.iloc[train_idx].nunique()
+        test_patients = groups.iloc[test_idx].nunique()
+        
+        st.success(f"✅ Hasta Bazlı Ayrım: {train_patients} hasta (train) | {test_patients} hasta (test)")
+    else:
+        # Çok az hasta varsa standart split kullan ama uyar
+        st.warning(f"⚠️ Sadece {unique_patients} benzersiz hasta var. Standart split kullanılıyor.")
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    
     st.write(f"📊 Train Ort. UPDRS: {y_train.mean():.2f} | Test Ort. UPDRS: {y_test.mean():.2f}")
     
-    # Scaling (MinMaxScaler - Yüksek skor için ideal)
+    progress.progress(50)
+    
+    # ========== 5. SCALING ==========
     scaler = MinMaxScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
     
-    # XGBoost Eğitimi (Yüksek Kapasite)
-    model = xgb.XGBRegressor(
-        n_estimators=1000,      
-        learning_rate=0.05,     
-        max_depth=7,            # Derinlik artırıldı (ilişkileri daha iyi yakalar)
-        min_child_weight=1,
-        gamma=0.0,              
-        subsample=0.8,
-        colsample_bytree=0.8,
-        # Regularization azaltıldı
-        reg_alpha=0.0,          
-        reg_lambda=1.0,         
-        n_jobs=-1,
-        random_state=42
-    )
-    model.fit(X_train_scaled, y_train)
+    progress.progress(60)
     
-    # Model, Scaler ve Feature Columns'u Kaydet
-    # XGBoost 3.x fix: Sklearn wrapper hatasını önlemek için booster'ı kaydet
+    # ========== 6. MODEL EĞİTİMİ (Güçlü Regularization) ==========
+    status.info("🤖 Model eğitiliyor (güçlü regularization aktif)...")
+    
+    model = xgb.XGBRegressor(
+        n_estimators=500,           # Azaltıldı (overfitting önleme)
+        learning_rate=0.03,         # Düşürüldü (daha yavaş öğrenme)
+        max_depth=4,                # AZALTILDI (karmaşıklık sınırı)
+        min_child_weight=5,         # ARTIRILDI (yaprak başına min örnek)
+        gamma=0.2,                  # ARTIRILDI (bölünme için min kazanç)
+        subsample=0.7,              # Azaltıldı (her ağaç için veri örneklemi)
+        colsample_bytree=0.7,       # Azaltıldı (her ağaç için feature örneklemi)
+        
+        # ===== GÜÇLENDİRİLMİŞ REGULARIZATION =====
+        reg_alpha=1.0,              # L1 regularization (ARTIRILDI: 0 → 1.0)
+        reg_lambda=5.0,             # L2 regularization (ARTIRILDI: 1 → 5.0)
+        
+        n_jobs=-1,
+        random_state=42,
+        
+        # Early stopping için
+        early_stopping_rounds=50
+    )
+    
+    # Early stopping ile eğit
+    model.fit(
+        X_train_scaled, y_train,
+        eval_set=[(X_test_scaled, y_test)],
+        verbose=False
+    )
+    
+    progress.progress(80)
+    
+    # ========== 7. KAYDETME ==========
+    status.info("💾 Model kaydediliyor...")
+    
     model.get_booster().save_model(MODEL_FILE)
     
     import pickle
@@ -170,16 +305,44 @@ def train_model():
     with open('feature_cols.json', 'w') as f:
         json.dump(list(X.columns), f)
     
-    # Test Skoru
-    score = model.score(X_test_scaled, y_test)
+    progress.progress(90)
     
-    # Bilgi Mesajları
-    status.success(f"✅ Eğitim Tamamlandı! Test R² skoru: {score:.3f}")
-    st.info(f"ℹ️ Feature sayısı: {len(X.columns)}")
-    st.info(f"ℹ️ Train: {len(X_train)} kayıt, Test: {len(X_test)} kayıt")
+    # ========== 8. DEĞERLENDİRME ==========
+    train_score = model.score(X_train_scaled, y_train)
+    test_score = model.score(X_test_scaled, y_test)
     
-    # Standart split olduğu için hasta bazlı ayrım loguna gerek yok (veya yaklaşık verilebilir)
-    st.success("✅ Model başarıyla güncellendi.")
+    # Overfitting kontrolü
+    overfit_gap = train_score - test_score
+    
+    progress.progress(100)
+    
+    # Sonuç raporu
+    st.divider()
+    st.subheader("📊 Eğitim Raporu")
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Train R²", f"{train_score:.3f}")
+    col2.metric("Test R²", f"{test_score:.3f}")
+    col3.metric("Overfit Gap", f"{overfit_gap:.3f}", 
+                delta_color="inverse" if overfit_gap > 0.1 else "normal")
+    
+    if overfit_gap > 0.15:
+        st.error("⚠️ YÜKSEK OVERFIT TESPİT EDİLDİ! Daha fazla veri toplamanız önerilir.")
+    elif overfit_gap > 0.10:
+        st.warning("⚠️ Hafif overfit belirtisi. Dikkatli olun.")
+    else:
+        st.success("✅ Model dengeli görünüyor (düşük overfit riski).")
+    
+    st.info(f"""
+    **Eğitim Özeti:**
+    - Feature sayısı: {len(X.columns)}
+    - Train: {len(X_train)} kayıt | Test: {len(X_test)} kayıt
+    - Benzersiz hasta: {unique_patients}
+    - Yeni hasta verisi: {new_record_count} (augmented)
+    - Early stopping round: {model.best_iteration if hasattr(model, 'best_iteration') else 'N/A'}
+    """)
+    
+    status.success("✅ Eğitim Tamamlandı!")
     
     return scaler, list(X.columns)
 
@@ -383,6 +546,53 @@ def doctor_panel():
                 else:
                     # Create combined visualization
                     st.subheader(f"📊 {selected_patient} - Hastalık Takibi")
+                    
+                    # ========== KAYIT SAYISI VE GÜVENİLİRLİK GÖSTERGESİ ==========
+                    # Klinik kayıt sayısını hesapla
+                    clinical_record_count = 0
+                    if os.path.exists(NEW_DATA_FILE):
+                        try:
+                            clin_df = pd.read_csv(NEW_DATA_FILE)
+                            clin_df['subject#'] = pd.to_numeric(clin_df['subject#'], errors='coerce')
+                            clinical_record_count = len(clin_df[clin_df['subject#'] == int(pat_id)])
+                        except:
+                            pass
+                    
+                    # Evden gönderilen kayıt sayısı
+                    home_record_count = len(logs) if 'logs' in dir() and not logs.empty else 0
+                    if os.path.exists(HISTORY_FILE):
+                        try:
+                            home_df = pd.read_csv(HISTORY_FILE)
+                            home_record_count = len(home_df[home_df['Subject_ID'] == pat_id])
+                        except:
+                            pass
+                    
+                    total_records = clinical_record_count + home_record_count
+                    
+                    # Güvenilirlik hesapla
+                    if total_records >= 10:
+                        reliability = "� Yüksek"
+                        reliability_desc = "Model bu hasta için güvenilir tahminler yapabilir."
+                    elif total_records >= 5:
+                        reliability = "🟡 Orta"
+                        reliability_desc = "Daha fazla kayıt güvenilirliği artırır."
+                    else:
+                        reliability = "🔴 Düşük"
+                        reliability_desc = "En az 10 kayıt önerilir. Sonuçları dikkatli yorumlayın."
+                    
+                    # Bilgi kutusu
+                    with st.expander("📋 Veri & Model Güvenilirliği", expanded=True):
+                        rcol1, rcol2, rcol3 = st.columns(3)
+                        rcol1.metric("Klinik Kayıt", f"{clinical_record_count}")
+                        rcol2.metric("Evden Gönderilen", f"{home_record_count}")
+                        rcol3.metric("Güvenilirlik", reliability)
+                        
+                        if total_records < 10:
+                            st.warning(f"⚠️ {reliability_desc}")
+                        else:
+                            st.success(f"✅ {reliability_desc}")
+                    
+                    st.divider()
                     
                     # Show clinical baseline if exists
                     if clinical_baseline is not None:
