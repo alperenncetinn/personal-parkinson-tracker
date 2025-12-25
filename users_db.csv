@@ -1,6 +1,5 @@
 Username,Password,Role,Name,ID,Doctor_ID,Age,Sex
 doktor,123,Doctor,Dr. Zekeriya,999,0,0,0
-tugbaerdogan,tugbaerdogan1234,Doctor,Dr. Tugba Erdogan,2,0,0,0
-ali,123,Patient,Ali Yılmaz,1,999,65,0
-ayse,123,Patient,Ayşe Demir,2,999,72,1
 alp,123,Patient,alperen,1000,999,20,0
+test,123,Patient,test,1001,999,50,1
+admin,123,Admin,System Admin,1100,0,0,0

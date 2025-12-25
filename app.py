@@ -55,6 +55,28 @@ def init_system():
             f.write(CSV_HEADER + '\n')
         st.success('Yeni veri dosyası oluşturuldu ve başlık eklendi.')
 
+    # 3. Admin Kontrolü (Sonradan eklenen özellik)
+    if os.path.exists(USERS_FILE):
+        try:
+            users_df = pd.read_csv(USERS_FILE)
+            if 'Role' in users_df.columns and not users_df['Username'].isin(['admin']).any():
+                # Admin yoksa ekle
+                max_id = users_df['ID'].max() if not users_df.empty else 0
+                admin_user = pd.DataFrame([{
+                    'Username': 'admin',
+                    'Password': '123', # Kolay test için 123
+                    'Role': 'Admin',
+                    'Name': 'System Admin',
+                    'ID': max_id + 99,
+                    'Doctor_ID': 0,
+                    'Age': 0,
+                    'Sex': 0
+                }])
+                combined = pd.concat([users_df, admin_user], ignore_index=True)
+                combined.to_csv(USERS_FILE, index=False)
+        except Exception:
+            pass
+
 init_system()
 
 # --------------------------------------------------------
@@ -284,7 +306,7 @@ def extract_audio_features(audio_path):
 # --------------------------------------------------------
 
 def login_page():
-    st.markdown("<h1 style='text-align: center;'>🧠 Parkinson AI Sistemi</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center;'>Parkinson AI Sistemi</h1>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1,2,1])
     with c2:
         with st.form("login"):
@@ -750,6 +772,108 @@ def doctor_panel():
             scaler, cols = train_model()
             st.balloons()
 
+def admin_panel():
+    st.title("🛡️ Yönetici (Admin) Paneli")
+    st.markdown("Bu panelden sistemdeki kullanıcıları yönetebilir ve yeni doktorlar ekleyebilirsiniz.")
+    
+    tab1, tab2 = st.tabs(["👥 Kullanıcı Yönetimi / Silme", "👨‍⚕️ Yeni Doktor Ekle"])
+    
+    # --- TAB 1: KULLANICI YÖNETİMİ ---
+    with tab1:
+        if os.path.exists(USERS_FILE):
+            users = pd.read_csv(USERS_FILE)
+            
+            # Admin kendisini silmesin
+            users_view = users[users['Username'] != 'admin']
+            
+            st.dataframe(users_view[['ID', 'Role', 'Name', 'Username', 'Age']], use_container_width=True)
+            
+            st.divider()
+            st.subheader("🗑️ Kullanıcı Sil")
+            
+            user_to_delete = st.selectbox("Silinecek Kullanıcıyı Seçin:", users_view['Username'].unique(), index=None, placeholder="Kullanıcı seç...")
+            
+            if user_to_delete:
+                user_row = users_view[users_view['Username'] == user_to_delete].iloc[0]
+                role = user_row['Role']
+                u_id = user_row['ID']
+                
+                if role == 'Patient':
+                    st.warning(f"⚠️ DİKKAT: '{user_to_delete}' bir HASTA hesabıdır. Silindiğinde tüm ses kayıtları, loglar ve veriler KALICI OLARAK silinir.")
+                else:
+                    st.warning(f"⚠️ DİKKAT: '{user_to_delete}' bir DOKTOR hesabıdır. Silindiğinde bu doktora bağlı hastalar sahipsiz kalabilir.")
+                
+                if st.button(f"🔴 {user_to_delete} Hesabını Kalıcı Olarak Sil"):
+                    try:
+                        # 1. Users DB'den sil
+                        new_users = users[users['ID'] != u_id]
+                        new_users.to_csv(USERS_FILE, index=False)
+                        
+                        # Eğer Hastaysa tüm verilerini temizle
+                        if role == 'Patient':
+                            # Klinik Veriden sil (NEW_DATA_FILE)
+                            if os.path.exists(NEW_DATA_FILE):
+                                nd = pd.read_csv(NEW_DATA_FILE)
+                                # subject# tip dönüşümü güvenliği
+                                nd['subject#'] = pd.to_numeric(nd['subject#'], errors='coerce')
+                                nd = nd[nd['subject#'] != u_id]
+                                nd.to_csv(NEW_DATA_FILE, index=False)
+                                
+                            # Loglardan sil (HISTORY_FILE)
+                            if os.path.exists(HISTORY_FILE):
+                                hist = pd.read_csv(HISTORY_FILE)
+                                hist = hist[hist['Subject_ID'] != u_id]
+                                hist.to_csv(HISTORY_FILE, index=False)
+                                
+                            # Ses klasörünü sil
+                            rec_dir = f"patient_recordings/{u_id}"
+                            if os.path.exists(rec_dir):
+                                shutil.rmtree(rec_dir)
+                                
+                        st.success(f"✅ {user_to_delete} başarıyla silindi! Sayfa yenileniyor...")
+                        time.sleep(1)
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"Silme hatası: {e}")
+        else:
+            st.error("Kullanıcı veritabanı bulunamadı.")
+
+    # --- TAB 2: DOKTOR EKLEME ---
+    with tab2:
+        st.subheader("Yeni Doktor Profili Oluştur")
+        
+        with st.form("add_doctor_form"):
+            d_name = st.text_input("Doktor Adı Soyadı", placeholder="Örn: Dr. Ayşe Yılmaz")
+            d_user = st.text_input("Kullanıcı Adı", placeholder="doktor2")
+            d_pass = st.text_input("Şifre", type="password")
+            
+            submitted = st.form_submit_button("Doktor Ekle")
+            
+            if submitted:
+                if not d_name or not d_user or not d_pass:
+                    st.error("Tüm alanları doldurunuz.")
+                else:
+                    users = pd.read_csv(USERS_FILE, dtype={'Username': str})
+                    if d_user in users['Username'].values:
+                        st.error("Bu kullanıcı adı zaten kullanımda.")
+                    else:
+                        new_id = int(users['ID'].max()) + 1
+                        
+                        new_doc = pd.DataFrame([{
+                            'Username': d_user,
+                            'Password': d_pass,
+                            'Role': 'Doctor',
+                            'Name': d_name,
+                            'ID': new_id,
+                            'Doctor_ID': 0, # Doktorların doktoru olmaz
+                            'Age': 0, # N/A
+                            'Sex': 0
+                        }])
+                        
+                        new_doc.to_csv(USERS_FILE, mode='a', header=False, index=False)
+                        st.success(f"✅ {d_name} sisteme başarıyla eklendi!")
+
 def patient_panel():
     user = st.session_state['user']
     st.title(f"Hoşgeldiniz, {user['Name']}")
@@ -968,7 +1092,10 @@ else:
             st.rerun()
 
     # Yönlendirme
-    if st.session_state['user']['Role'] == 'Doctor':
+    role = st.session_state['user']['Role']
+    if role == 'Doctor':
         doctor_panel()
+    elif role == 'Admin':
+        admin_panel()
     else:
         patient_panel()
