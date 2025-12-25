@@ -13,12 +13,12 @@ temp_calib.wav
 temp_pat.wav
 
 # Project Specific - Data & Security
-patient_recordings/
-users_db.csv
-new_patients_data.csv
-patient_logs.csv
-patient_logs_backup.csv
-history_log.csv
+# patient_recordings/
+# users_db.csv
+# new_patients_data.csv
+# patient_logs.csv
+# patient_logs_backup.csv
+# history_log.csv
 
 # Model Files (Optional - can be committed if versioning needed)
 # trained_model.json
