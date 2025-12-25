@@ -336,11 +336,17 @@ def doctor_panel():
                 if os.path.exists(NEW_DATA_FILE):
                     try:
                         clinical_data = pd.read_csv(NEW_DATA_FILE)
-                        patient_clinical = clinical_data[clinical_data['subject#'] == pat_id]
+                        # Tip dönüşümü: subject# sütununu int'e çevir
+                        clinical_data['subject#'] = pd.to_numeric(clinical_data['subject#'], errors='coerce').astype('Int64')
+                        pat_id_int = int(pat_id)
+                        patient_clinical = clinical_data[clinical_data['subject#'] == pat_id_int]
                         if not patient_clinical.empty:
-                            clinical_baseline = patient_clinical['UPDRS_baseline'].values[0]
-                    except Exception:
-                        pass
+                            baseline_value = patient_clinical['UPDRS_baseline'].values[0]
+                            # NaN kontrolü
+                            if pd.notna(baseline_value):
+                                clinical_baseline = float(baseline_value)
+                    except Exception as e:
+                        st.warning(f"Klinik baseline yüklenirken hata: {e}")
                 
                 # 2. Get Prediction History (from patient's home uploads)
                 predictions_exist = False
