@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import xgboost as xgb
 import parselmouth
 from parselmouth.praat import call
 import os
@@ -161,7 +160,7 @@ def train_model():
     new_patient_count = full_data['subject#'].nunique() if not full_data.empty else 0
     
     if new_record_count < 10:
-        st.warning(f"⚠️ Sadece {new_record_count} kayıt var. En az 10 kayıt önerilir.")
+        st.info(f"ℹ️ Şu an {new_record_count} kayıt var. Kişiye özel modeller 5+ kayıtta devreye girer.")
     
     st.info(f"📊 Eğitim verisi: {new_record_count} kayıt, {new_patient_count} hasta")
     
@@ -274,13 +273,11 @@ def train_model():
         col1.metric("Train R²", f"{train_score:.3f}")
         col2.metric("Test R²", f"{test_score:.3f}")
         
-        st.caption("""
-        ⚠️ **Global model düşük R² normal!** Çünkü:
-        - Her hastanın sesi benzersiz
-        - Ses-UPDRS ilişkisi kişiye özgü
-        - Global model sadece yedek olarak kullanılır
+        st.info("""
+        ℹ️ **Global Modelin Rolü:**
+        Bu model genel hasta popülasyonundan öğrenir ve **yeni hastalar için başlangıç tahmini** (cold-start) sağlar.
         
-        **Önemli olan kişiye özel modellerdir** → Her hasta için ayrı eğitilir
+        Asıl hassas takip, her hasta için ayrı eğitilen **Kişiye Özel Modeller** ile yapılır.
         """)
     
     # Kişiye özel model bilgisi
@@ -1051,7 +1048,7 @@ def doctor_panel():
         
         # ========== GLOBAL MODEL BİLGİLERİ ==========
         st.subheader("🌐 Global Model")
-        st.caption("Tüm hastalardan öğrenen genel XGBoost modeli")
+        st.caption("Genel popülasyondan öğrenen Global Model (Ridge Regression)")
         
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -1367,10 +1364,16 @@ def admin_panel():
         # 3. ALGORİTMİK KARARLAR
         st.subheader("3. Kritik Algoritmik Kararlar")
         
-        with st.expander("🛠️ Neden Ridge Regression?"):
+        with st.expander("🛠️ Neden Ridge Regression? (XGBoost vs Ridge)"):
             st.markdown("""
-            *   **Regularization (L2):** Ridge, katsayıları (weights) baskılayarak modelin tek bir özelliğe aşırı güvenmesini engeller. Bu, az veriyle çalışırken hayati önem taşır.
-            *   **Kararlılık:** Gürültülü verilerde Linear Regression'a göre çok daha kararlı sonuçlar verir.
+            Bu projede model seçimi kritik bir dönüm noktası olmuştur:
+            
+            *   ❌ **XGBoost (Denenen):** Çok güçlü bir algoritma olmasına rağmen, hasta başına düşen az sayıdaki veri (10-30 kayıt) ile çalışırken **Variance** sorunu yaşamıştır. Model, verideki gürültüyü de öğrenerek **R²=1.00** (Perfect Fit) vermiş, ancak genelleme yeteneğini kaybetmiştir.
+            
+            *   ✅ **Ridge Regression (Seçilen):** Linear Regression'a eklenen **L2 (Squared Magnitude)** ceza terimi ile çalışır.
+                *   `Loss = RSS + alpha * (sum of squared weights)`
+                *   Bu formül, katsayıların (weights) aşırı büyümesini engeller.
+                *   Sonuç: Daha "düz" ve kararlı bir regresyon doğrusu.
             """)
             
         with st.expander("🎛️ Dinamik Alpha (Regularization) Sistemi"):
@@ -1445,8 +1448,13 @@ def admin_panel():
             st.markdown("#### 🤖 Makine Öğrenmesi (Hibrit Yaklaşım)")
             st.markdown("""
             Literatürdeki çalışmaların aksine, bu projede **dinamik bir hibrit yapı** kullanılmıştır:
-            1.  **Global Model:** Genel popülasyondan öğrenen, başlangıç tahminini yapan XGBoost/Ridge modeli.
-            2.  **Kişisel Adaptasyon:** Hastadan en az 5-10 kayıt alındıktan sonra devreye giren, hastanın kendi baseline'ına göre eğitilen Ridge Regresyon modeli.
+            1.  **Global Model:** Genel popülasyondan öğrenen, başlangıç tahminini yapan Ridge Regression modeli.
+            2.  **Kişisel Adaptasyon:** Hastadan en az 5 kayıt alındıktan sonra devreye giren Ridge Regresyon modeli.
+            
+            **Neden XGBoost Terk Edildi?**
+            Projenin ilk aşamalarında denenen XGBoost (Gradient Boosting), az sayıda hasta verisiyle (n<50) çalışırken **"Overfitting" (Aşırı Öğrenme)** sorunu yaşamıştır. Model, eğitim verisini ezberleyerek **R²=1.0** gibi yapay bir başarı göstermiş, ancak yeni verilerde başarısız olmuştur.
+            
+            Bu nedenle, **Ridge Regression (L2 Regularization)** tercih edilmiştir. Ridge, katsayıları baskılayarak modelin gürültüye (noise) odaklanmasını engeller ve az veride dahi kararlı (robust) sonuçlar üretir.
             """)
             
         st.divider()
