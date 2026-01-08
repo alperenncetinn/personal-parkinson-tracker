@@ -9,7 +9,7 @@ import shutil
 import time
 from sklearn.preprocessing import MinMaxScaler, StandardScaler, RobustScaler
 from sklearn.model_selection import train_test_split, GroupShuffleSplit
-from sklearn.metrics import r2_score
+from sklearn.metrics import r2_score, mean_absolute_error
 
 # Ses kayıt bileşeni
 try:
@@ -261,6 +261,12 @@ def train_model():
     train_score = model.score(X_train_scaled, y_train)
     test_score = model.score(X_test_scaled, y_test)
     
+    # MAE Hesaplama
+    train_pred = model.predict(X_train_scaled)
+    test_pred = model.predict(X_test_scaled)
+    train_mae = mean_absolute_error(y_train, train_pred)
+    test_mae = mean_absolute_error(y_test, test_pred)
+    
     progress.progress(100)
     
     # Sonuç raporu
@@ -269,9 +275,11 @@ def train_model():
     
     # Global model bilgi (önemli değil mesajıyla)
     with st.expander("🌐 Global Model Metrikleri (Referans)", expanded=False):
-        col1, col2 = st.columns(2)
-        col1.metric("Train R²", f"{train_score:.3f}")
-        col2.metric("Test R²", f"{test_score:.3f}")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Train R²", f"{train_score:.3f}")
+        c2.metric("Test R²", f"{test_score:.3f}")
+        c3.metric("Train MAE", f"{train_mae:.2f}")
+        c4.metric("Test MAE", f"{test_mae:.2f}")
         
         st.info("""
         ℹ️ **Global Modelin Rolü:**
@@ -411,11 +419,20 @@ def get_active_model():
                             
                             # R² hesapla
                             train_score = personal_model.score(X_scaled, y_patient)
+
+                            # MAE hesapla
+                            y_pred_personal = personal_model.predict(X_scaled)
+                            train_mae = mean_absolute_error(y_patient, y_pred_personal)
                             
                             # Cross-validation
                             cv_scores = cross_val_score(personal_model, X_scaled, y_patient, 
                                                        cv=min(5, len(X_patient)), scoring='r2')
                             cv_score = max(0, cv_scores.mean())
+
+                            # Cross-validation (MAE)
+                            cv_mae_scores = cross_val_score(personal_model, X_scaled, y_patient,
+                                                           cv=min(5, len(X_patient)), scoring='neg_mean_absolute_error')
+                            cv_mae = -cv_mae_scores.mean()
                             
                             # Kaydet
                             with open(patient_model_file, 'wb') as f:
@@ -425,6 +442,8 @@ def get_active_model():
                                     'features': key_features,
                                     'train_r2': train_score,
                                     'cv_r2': cv_score,
+                                    'train_mae': train_mae,
+                                    'cv_mae': cv_mae,
                                     'n_samples': len(X_patient)
                                 }, f)
                             
@@ -434,6 +453,8 @@ def get_active_model():
                                 'features': key_features,
                                 'train_r2': train_score,
                                 'cv_r2': cv_score,
+                                'train_mae': train_mae,
+                                'cv_mae': cv_mae,
                                 'n_samples': len(X_patient)
                             }
                     except Exception as e:
@@ -1097,44 +1118,55 @@ def doctor_panel():
                 
                 if os.path.exists(model_file):
                     try:
+
                         with open(model_file, 'rb') as f:
                             pm = pickle.load(f)
                         train_r2 = pm.get('train_r2', 0)
                         cv_r2 = pm.get('cv_r2', 0)
+                        train_mae = pm.get('train_mae', 0)
+                        cv_mae = pm.get('cv_mae', 0)
                         n_samples = pm.get('n_samples', 0)
                         model_performance.append({
                             'Hasta ID': pid,
                             'Model': '🎯 Kişiye Özel',
                             'Train R²': f"{train_r2:.2f}" if train_r2 else "N/A",
-                            'CV R²': f"{cv_r2:.2f}" if cv_r2 is not None else "N/A"
+                            'CV R²': f"{cv_r2:.2f}" if cv_r2 is not None else "N/A",
+                            'Train MAE': f"{train_mae:.2f}" if train_mae else "N/A",
+                            'CV MAE': f"{cv_mae:.2f}" if cv_mae else "N/A"
                         })
                     except:
                         model_performance.append({
                             'Hasta ID': pid,
                             'Model': '⚠️ Hata',
                             'Train R²': "N/A",
-                            'CV R²': "N/A"
+                            'CV R²': "N/A",
+                            'Train MAE': "N/A",
+                            'CV MAE': "N/A"
                         })
                 elif row['Kayıt Sayısı'] >= 5:
                     model_performance.append({
                         'Hasta ID': pid,
                         'Model': '⏳ Eğitilmedi',
                         'Train R²': "-",
-                        'CV R²': "-"
+                        'CV R²': "-",
+                        'Train MAE': "-",
+                        'CV MAE': "-"
                     })
                 else:
                     model_performance.append({
                         'Hasta ID': pid,
                         'Model': f"❌ {5 - int(row['Kayıt Sayısı'])} kayıt daha",
                         'Train R²': "-",
-                        'CV R²': "-"
+                        'CV R²': "-",
+                        'Train MAE': "-",
+                        'CV MAE': "-"
                     })
             
             perf_df = pd.DataFrame(model_performance)
             patient_stats = patient_stats.merge(perf_df, on='Hasta ID', how='left')
             
             # Tabloyu göster
-            display_cols = ['Hasta', 'Kayıt Sayısı', 'Ort. UPDRS', 'Model', 'Train R²', 'CV R²']
+            display_cols = ['Hasta', 'Kayıt Sayısı', 'Ort. UPDRS', 'Model', 'Train R²', 'CV R²', 'Train MAE', 'CV MAE']
             st.dataframe(
                 patient_stats[display_cols],
                 column_config={
@@ -1143,7 +1175,9 @@ def doctor_panel():
                     "Ort. UPDRS": st.column_config.NumberColumn("Baseline", format="%.1f"),
                     "Model": st.column_config.TextColumn("Model Durumu"),
                     "Train R²": st.column_config.TextColumn("Eğitim R²", help="Model eğitim skoru"),
-                    "CV R²": st.column_config.TextColumn("Test R²", help="Cross-validation skoru (gerçek performans)")
+                    "CV R²": st.column_config.TextColumn("Test R²", help="Cross-validation skoru (gerçek performans)"),
+                    "Train MAE": st.column_config.TextColumn("Eğitim MAE", help="Ortalama Mutlak Hata (Daha düşük iyidir)"),
+                    "CV MAE": st.column_config.TextColumn("Test MAE", help="Cross-validation MAE")
                 },
                 hide_index=True,
                 use_container_width=True
